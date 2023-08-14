@@ -12,7 +12,6 @@ import org.javacord.api.entity.message.component.SelectMenu;
 import org.javacord.api.entity.message.component.SelectMenuOption;
 import org.javacord.api.entity.message.embed.EmbedBuilder;
 import org.javacord.api.entity.permission.PermissionType;
-import org.javacord.api.entity.server.Server;
 import org.javacord.api.entity.user.User;
 import org.javacord.api.interaction.*;
 import org.javacord.api.util.logging.FallbackLoggerConfiguration;
@@ -125,7 +124,9 @@ public class MainBot {
                 Calendar cal = Calendar.getInstance();
                 int hour = cal.get(Calendar.HOUR_OF_DAY);
                 int minute = cal.get(Calendar.MINUTE);
-                if(hour == 10 && minute < 3) {
+                boolean general = hour == 10 && minute < 2;
+                boolean dunkene = hour == 17 && minute < 2;
+                if(general || dunkene) {
                     HashMap<String, List<Object>> tasks = new HashMap<>();
                     try (Connection conn = db.getConnection(); PreparedStatement ps = conn.prepareStatement(
                             "SELECT task_name, message_description, next_ping, ping_interval, order_list FROM tasks")) {
@@ -148,14 +149,17 @@ public class MainBot {
                     if(!tasks.isEmpty()) {
                         Calendar today = Calendar.getInstance();
                         tasks.forEach((task, data) -> {
-                            if(!tasksPinged.containsKey(task)) {
-                                Calendar pingDay = Calendar.getInstance();
-                                pingDay.setTime(new Date((long) data.get(1)));
-                                if (today.get(Calendar.DAY_OF_YEAR) == pingDay.get(Calendar.DAY_OF_YEAR)) {
-                                    long person = getCurrentPerson(task);
-                                    String personName = getName(person);
-                                    if (!personName.isEmpty()) {
-                                        pingTask(task);
+                            boolean isGeneral = !task.toLowerCase().contains("dunkene");
+                            if((isGeneral && general) || (!isGeneral && dunkene)) {
+                                if (!tasksPinged.containsKey(task)) {
+                                    Calendar pingDay = Calendar.getInstance();
+                                    pingDay.setTime(new Date((long) data.get(1)));
+                                    if (today.get(Calendar.DAY_OF_YEAR) == pingDay.get(Calendar.DAY_OF_YEAR)) {
+                                        long person = getCurrentPerson(task);
+                                        String personName = getName(person);
+                                        if (!personName.isEmpty()) {
+                                            pingTask(task);
+                                        }
                                     }
                                 }
                             }
@@ -174,6 +178,8 @@ public class MainBot {
                         List<Long> pingData = tasksPinged.get(task);
                         long pingedAt = pingData.get(0);
                         long pingTime = TimeUnit.HOURS.toMillis(8) + pingedAt;
+
+                        if(task.toLowerCase().contains("dunkene")) pingTime = TimeUnit.MINUTES.toMillis(15) + pingedAt;
 
                         if (System.currentTimeMillis() > pingTime) {
                             try {
@@ -215,7 +221,7 @@ public class MainBot {
                     }
                 }
             }
-        }, 0, TimeUnit.MINUTES.toMillis(1));
+        }, 0, TimeUnit.SECONDS.toMillis(30));
     }
     private static boolean canUseCommands(long person) {
         return !getName(person).isEmpty();
@@ -291,7 +297,6 @@ public class MainBot {
         defaultConfig.setProperty("database.user", "");
         defaultConfig.setProperty("database.password", "");
         defaultConfig.setProperty("discord.token", "");
-        defaultConfig.setProperty("discord.server", "");
         return defaultConfig;
     }
     public static void main(String[] args) {
@@ -317,86 +322,82 @@ public class MainBot {
         api = new DiscordApiBuilder()
                 .setToken(token)
                 .login().join();
-
-        String serverId = config.getProperty("discord.server");
-        if(serverId == null || serverId.isEmpty()) {
-            System.err.println("Discord server not set! Exiting...");
+        if(api == null) {
+            System.err.println("Failed to connect to Discord! Exiting...");
             System.exit(1);
         }
-        if(api.getServerById(serverId).isPresent()) {
-            Server server = api.getServerById(serverId).get();
-            db = new DatabaseHook(config);
 
-            FallbackLoggerConfiguration.setDebug(true);
-            FallbackLoggerConfiguration.setTrace(true);
-            pingedTasksTimer();
-            autoPingTasksTimer();
+        db = new DatabaseHook(config);
 
-            SlashCommand.with("pingtask", "pinge tasks")
-                    .setDefaultEnabledForPermissions(PermissionType.ADMINISTRATOR)
-                    .createForServer(server)
-                    .join();
+        FallbackLoggerConfiguration.setDebug(true);
+        FallbackLoggerConfiguration.setTrace(true);
+        pingedTasksTimer();
+        autoPingTasksTimer();
 
-            api.addSlashCommandCreateListener(event -> {
-                SlashCommandInteraction slashInt = event.getSlashCommandInteraction();
-                User commandUser = slashInt.getUser();
+        SlashCommand.with("pingtask", "pinge tasks")
+                .setDefaultEnabledForPermissions(PermissionType.ADMINISTRATOR)
+                .createGlobal(api)
+                .join();
 
-                if (canUseCommands(commandUser.getId())) {
-                    if(slashInt.getCommandName().equalsIgnoreCase("pingtask")) {
-                        slashInt.createImmediateResponder()
-                            .setContent("Velg hvilke tasks du vil pinge:")
-                            .addComponents(
-                                ActionRow.of(SelectMenu.createStringMenu("tasks", "Klikk for å vise tasks", 1, 1,
-                                    Arrays.asList(SelectMenuOption.create("Restavfall", "restavfall", "Klikk her for å pinge Restavfall Task"),
-                                        SelectMenuOption.create("Papp", "papp", "Klikk her for å pinge Papp Task"),
-                                        SelectMenuOption.create("Metall", "metall", "Klikk her for å pinge Metall Task"),
-                                        SelectMenuOption.create("Matavfall", "matavfall", "Klikk her for å pinge Matavfall Task"),
-                                        SelectMenuOption.create("Rydde (Teams)", "rydde", "Klikk her for å pinge Rydde (Teams)")))))
-                                .setFlags(MessageFlag.EPHEMERAL)
-                                .respond();
-                    }
-                } else {
+        api.addSlashCommandCreateListener(event -> {
+            SlashCommandInteraction slashInt = event.getSlashCommandInteraction();
+            User commandUser = slashInt.getUser();
+
+            if (canUseCommands(commandUser.getId())) {
+                if(slashInt.getCommandName().equalsIgnoreCase("pingtask")) {
                     slashInt.createImmediateResponder()
-                        .setContent("Trokkje du bør bruke denne her commanden asså")
-                        .setFlags(MessageFlag.EPHEMERAL)
-                        .respond();
+                        .setContent("Velg hvilke tasks du vil pinge:")
+                        .addComponents(
+                            ActionRow.of(SelectMenu.createStringMenu("tasks", "Klikk for å vise tasks", 1, 1,
+                                Arrays.asList(SelectMenuOption.create("Restavfall", "restavfall", "Klikk her for å pinge Restavfall Task"),
+                                    SelectMenuOption.create("Papp", "papp", "Klikk her for å pinge Papp Task"),
+                                    SelectMenuOption.create("Metall", "metall", "Klikk her for å pinge Metall Task"),
+                                    SelectMenuOption.create("Matavfall", "matavfall", "Klikk her for å pinge Matavfall Task"),
+                                    SelectMenuOption.create("Rydde (Teams)", "rydde", "Klikk her for å pinge Rydde (Teams)")))))
+                            .setFlags(MessageFlag.EPHEMERAL)
+                            .respond();
                 }
-            });
+            } else {
+                slashInt.createImmediateResponder()
+                    .setContent("Trokkje du bør bruke denne her commanden asså")
+                    .setFlags(MessageFlag.EPHEMERAL)
+                    .respond();
+            }
+        });
 
-            api.addSelectMenuChooseListener(event -> {
-                List<SelectMenuOption> tasks = event.getSelectMenuInteraction().getChosenOptions();
-                tasks.forEach(taskOption -> {
-                    String task = taskOption.getValue();
-                    long person = getCurrentPerson(task);
-                    String personName = getName(person);
-                    if (!personName.isEmpty()) {
-                        if (!tasksPinged.containsKey(task)) {
-                            String secName = pingTask(task);
-                            event.getInteraction().createImmediateResponder().setContent("Pinget " + personName + (!secName.isEmpty() ? " og " + secName : "") + " om " + task)
-                                    .setFlags(MessageFlag.EPHEMERAL).respond();
-                        } else {
-                            event.getInteraction().createImmediateResponder().setContent("Har allerede pinget " + task).setFlags(MessageFlag.EPHEMERAL).respond();
-                        }
+        api.addSelectMenuChooseListener(event -> {
+            List<SelectMenuOption> tasks = event.getSelectMenuInteraction().getChosenOptions();
+            tasks.forEach(taskOption -> {
+                String task = taskOption.getValue();
+                long person = getCurrentPerson(task);
+                String personName = getName(person);
+                if (!personName.isEmpty()) {
+                    if (!tasksPinged.containsKey(task)) {
+                        String secName = pingTask(task);
+                        event.getInteraction().createImmediateResponder().setContent("Pinget " + personName + (!secName.isEmpty() ? " og " + secName : "") + " om " + task)
+                                .setFlags(MessageFlag.EPHEMERAL).respond();
+                    } else {
+                        event.getInteraction().createImmediateResponder().setContent("Har allerede pinget " + task).setFlags(MessageFlag.EPHEMERAL).respond();
                     }
-                });
-            });
-
-            api.addButtonClickListener(event -> {
-                ButtonInteraction messageComponentInteraction = event.getButtonInteraction();
-                String task = messageComponentInteraction.getCustomId();
-                long person = event.getInteraction().getUser().getId();
-                if ((!task.equalsIgnoreCase("rydde") && person == getCurrentPerson(task))
-                        || (task.equalsIgnoreCase("rydde") && tasksPinged.containsKey(task) && (person == getCurrentPerson(task) || person == getSecondPerson(task)))) {
-                    messageComponentInteraction.getMessage().delete();
-                    setNextPerson(task);
-                    event.getInteraction().createImmediateResponder()
-                        .setContent(task + " listen har blitt oppdatert")
-                        .setFlags(MessageFlag.EPHEMERAL)
-                        .respond();
-                } else {
-                    messageComponentInteraction.getMessage().delete();
                 }
             });
-        }
+        });
+
+        api.addButtonClickListener(event -> {
+            ButtonInteraction messageComponentInteraction = event.getButtonInteraction();
+            String task = messageComponentInteraction.getCustomId();
+            long person = event.getInteraction().getUser().getId();
+            if ((!task.equalsIgnoreCase("rydde") && person == getCurrentPerson(task))
+                    || (task.equalsIgnoreCase("rydde") && tasksPinged.containsKey(task) && (person == getCurrentPerson(task) || person == getSecondPerson(task)))) {
+                messageComponentInteraction.getMessage().delete();
+                setNextPerson(task);
+                event.getInteraction().createImmediateResponder()
+                    .setContent(task + " listen har blitt oppdatert")
+                    .setFlags(MessageFlag.EPHEMERAL)
+                    .respond();
+            } else {
+                messageComponentInteraction.getMessage().delete();
+            }
+        });
     }
 }
