@@ -234,7 +234,7 @@ public class MainBot {
             String personName = getName(person);
             User user = api.getUserById(person).get();
             EmbedBuilder embed = new EmbedBuilder();
-            embed.setTitle("-= " + task.toUpperCase() + " TIME =-");
+            embed.setTitle("-= " + task.replace("_", " ").toUpperCase() + " TIME =-");
             boolean teams = task.equalsIgnoreCase("rydde");
             String desc = "";
             User secUser = null;
