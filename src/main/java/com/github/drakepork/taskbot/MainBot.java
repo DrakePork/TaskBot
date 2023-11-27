@@ -73,11 +73,9 @@ public class MainBot {
         Collections.shuffle(order);
         return order;
     }
-    private static void setNextPerson(String taskId, boolean giveScore) {
-        if(giveScore) updateScore(getCurrentPerson(taskId), 1);
+    private static void setNextPerson(String taskId) {
         List<String> order = getOrder(taskId);
         if(taskId.equalsIgnoreCase("rydde")) {
-            if(giveScore) updateScore(getSecondPerson(taskId), 1);
             order.remove(0);
             order.remove(0);
             if(order.size() == 1) {
@@ -170,12 +168,6 @@ public class MainBot {
                                 } else if(isGeneral) {
                                     long nextPing = (long) data.get(1);
                                     if(System.currentTimeMillis() > nextPing) {
-                                        long person = getCurrentPerson(task);
-                                        updateScore(person, -5);
-                                        if(task.equalsIgnoreCase("rydde")) {
-                                            long secPerson = getSecondPerson(task);
-                                            updateScore(secPerson, -5);
-                                        }
                                         long interval = (long) data.get(2);
                                         setNextPing(task, System.currentTimeMillis() + interval);
                                     }
@@ -187,17 +179,7 @@ public class MainBot {
             }
         }, 0, TimeUnit.SECONDS.toMillis(30));
     }
-    private static void updateScore(long person, int amount) {
-        try (Connection conn = db.getConnection(); PreparedStatement ps = conn.prepareStatement(
-                "UPDATE people SET score = score + ? WHERE discord = ?")) {
-            ps.setInt(1, amount);
-            ps.setLong(2, person);
-            ps.executeUpdate();
-        } catch (SQLException e) {
-            System.err.println("Couldn't update score in database! Exiting...");
-            System.exit(1);
-        }
-    }
+
     private static void pingedTasksTimer() {
         Timer timer = new Timer();
         timer.scheduleAtFixedRate(new TimerTask() {
@@ -227,10 +209,8 @@ public class MainBot {
                                     newPingData.add(sentMessage.getId());
                                     newPingData.add(pingData.get(2));
                                     boolean teams = task.equalsIgnoreCase("rydde");
-                                    if(!isDunker) updateScore(person, -1);
                                     if(teams) {
                                         long secPerson = getSecondPerson(task);
-                                        updateScore(secPerson, -1);
                                         user = api.getUserById(secPerson).get();
                                         if(user.getPrivateChannel().isPresent()) {
                                             messageId = pingData.get(2);
@@ -252,8 +232,7 @@ public class MainBot {
 
                                         long hoursSinceFirstPinged = ChronoUnit.HOURS.between(firstPinged, now);
                                         if(hoursSinceFirstPinged >= 18) {
-                                            updateScore(person, -10);
-                                            setNextPerson(task, false);
+                                            setNextPerson(task);
                                         }
                                     }
                                 }
@@ -503,7 +482,7 @@ public class MainBot {
             if ((!task.equalsIgnoreCase("rydde") && person == getCurrentPerson(task))
                     || (task.equalsIgnoreCase("rydde") && tasksPinged.containsKey(task) && (person == getCurrentPerson(task) || person == getSecondPerson(task)))) {
                 messageComponentInteraction.getMessage().delete();
-                setNextPerson(task, true);
+                setNextPerson(task);
                 event.getInteraction().createImmediateResponder()
                     .setContent(task + " listen har blitt oppdatert")
                     .setFlags(MessageFlag.EPHEMERAL)
