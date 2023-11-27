@@ -1,5 +1,6 @@
 package com.github.drakepork.taskbot;
 
+import org.apache.commons.text.WordUtils;
 import org.javacord.api.DiscordApi;
 import org.javacord.api.DiscordApiBuilder;
 import org.javacord.api.entity.channel.PrivateChannel;
@@ -18,6 +19,9 @@ import org.javacord.api.util.logging.FallbackLoggerConfiguration;
 
 import java.io.*;
 import java.sql.*;
+import java.time.*;
+import java.time.format.TextStyle;
+import java.time.temporal.ChronoUnit;
 import java.util.*;
 import java.util.Date;
 import java.util.concurrent.ExecutionException;
@@ -69,9 +73,11 @@ public class MainBot {
         Collections.shuffle(order);
         return order;
     }
-    private static void setNextPerson(String taskId) {
+    private static void setNextPerson(String taskId, boolean giveScore) {
+        if(giveScore) updateScore(getCurrentPerson(taskId), 1);
         List<String> order = getOrder(taskId);
         if(taskId.equalsIgnoreCase("rydde")) {
+            if(giveScore) updateScore(getSecondPerson(taskId), 1);
             order.remove(0);
             order.remove(0);
             if(order.size() == 1) {
@@ -124,8 +130,8 @@ public class MainBot {
                 Calendar cal = Calendar.getInstance();
                 int hour = cal.get(Calendar.HOUR_OF_DAY);
                 int minute = cal.get(Calendar.MINUTE);
-                boolean general = hour == 10 && minute < 2;
-                boolean dunkene = hour == 17 && minute < 2;
+                boolean general = hour == 10 && minute < 4;
+                boolean dunkene = hour == 17 && minute < 4;
                 if(general || dunkene) {
                     HashMap<String, List<Object>> tasks = new HashMap<>();
                     try (Connection conn = db.getConnection(); PreparedStatement ps = conn.prepareStatement(
@@ -161,6 +167,18 @@ public class MainBot {
                                             pingTask(task);
                                         }
                                     }
+                                } else if(isGeneral) {
+                                    long nextPing = (long) data.get(1);
+                                    if(System.currentTimeMillis() > nextPing) {
+                                        long person = getCurrentPerson(task);
+                                        updateScore(person, -5);
+                                        if(task.equalsIgnoreCase("rydde")) {
+                                            long secPerson = getSecondPerson(task);
+                                            updateScore(secPerson, -5);
+                                        }
+                                        long interval = (long) data.get(2);
+                                        setNextPing(task, System.currentTimeMillis() + interval);
+                                    }
                                 }
                             }
                         });
@@ -168,6 +186,17 @@ public class MainBot {
                 }
             }
         }, 0, TimeUnit.SECONDS.toMillis(30));
+    }
+    private static void updateScore(long person, int amount) {
+        try (Connection conn = db.getConnection(); PreparedStatement ps = conn.prepareStatement(
+                "UPDATE people SET score = score + ? WHERE discord = ?")) {
+            ps.setInt(1, amount);
+            ps.setLong(2, person);
+            ps.executeUpdate();
+        } catch (SQLException e) {
+            System.err.println("Couldn't update score in database! Exiting...");
+            System.exit(1);
+        }
     }
     private static void pingedTasksTimer() {
         Timer timer = new Timer();
@@ -178,8 +207,8 @@ public class MainBot {
                         List<Long> pingData = tasksPinged.get(task);
                         long pingedAt = pingData.get(0);
                         long pingTime = TimeUnit.HOURS.toMillis(8) + pingedAt;
-
-                        if(task.toLowerCase().contains("dunkene")) pingTime = TimeUnit.MINUTES.toMillis(15) + pingedAt;
+                        boolean isDunker = task.toLowerCase().contains("dunkene");
+                        if(isDunker) pingTime = TimeUnit.MINUTES.toMillis(15) + pingedAt;
 
                         if (System.currentTimeMillis() > pingTime) {
                             try {
@@ -196,9 +225,12 @@ public class MainBot {
                                     List<Long> newPingData = new ArrayList<>();
                                     newPingData.add(System.currentTimeMillis());
                                     newPingData.add(sentMessage.getId());
+                                    newPingData.add(pingData.get(2));
                                     boolean teams = task.equalsIgnoreCase("rydde");
+                                    if(!isDunker) updateScore(person, -1);
                                     if(teams) {
                                         long secPerson = getSecondPerson(task);
+                                        updateScore(secPerson, -1);
                                         user = api.getUserById(secPerson).get();
                                         if(user.getPrivateChannel().isPresent()) {
                                             messageId = pingData.get(2);
@@ -212,6 +244,18 @@ public class MainBot {
                                         }
                                     }
                                     tasksPinged.put(task, newPingData);
+
+                                    if(isDunker) {
+                                        ZonedDateTime firstPinged = Instant.ofEpochMilli(pingData.get(2))
+                                                .atZone(ZoneId.systemDefault());
+                                        ZonedDateTime now = ZonedDateTime.now();
+
+                                        long hoursSinceFirstPinged = ChronoUnit.HOURS.between(firstPinged, now);
+                                        if(hoursSinceFirstPinged >= 18) {
+                                            updateScore(person, -10);
+                                            setNextPerson(task, false);
+                                        }
+                                    }
                                 }
                             } catch (InterruptedException | ExecutionException e) {
                                 System.err.println("Something went wrong when trying to repeat a task ping! Exiting...");
@@ -226,7 +270,6 @@ public class MainBot {
     private static boolean canUseCommands(long person) {
         return !getName(person).isEmpty();
     }
-
     public static String pingTask(String task) {
         String secName = "";
         try {
@@ -264,6 +307,7 @@ public class MainBot {
             List<Long> pingData = new ArrayList<>();
             pingData.add(System.currentTimeMillis());
             pingData.add(sentMessage.getId());
+            pingData.add(System.currentTimeMillis());
             if(teams) {
                 embed.setDescription(desc + "\n\nDin lagkamerat er: " + personName);
                 msg.setEmbed(embed);
@@ -288,6 +332,68 @@ public class MainBot {
             System.err.println("Error creating the config file! Exiting...");
             System.exit(1);
         }
+    }
+    private static void sendStatus(SlashCommandInteraction slashInt) {
+        StringBuilder desc = new StringBuilder();
+        HashMap<String, List<Object>> tasks = new HashMap<>();
+        try (Connection conn = db.getConnection(); PreparedStatement ps = conn.prepareStatement(
+                "SELECT task_name, message_description, next_ping, ping_interval, order_list FROM tasks")) {
+            ResultSet rs = ps.executeQuery();
+            while (rs.next()) {
+                List<Object> taskData = new ArrayList<>();
+                taskData.add(rs.getString(2)); // msg 0
+                taskData.add(rs.getLong(3)); // next ping 1
+                taskData.add(rs.getLong(4)); // interval 2
+                taskData.add(rs.getString(5)); // order 3
+                tasks.put(rs.getString(1), taskData);
+            }
+        } catch (SQLException e) {
+            System.err.println("Couldn't get tasks from database! Exiting...");
+            System.exit(1);
+        }
+
+        tasks.forEach((task, data) -> {
+            String personName = getName(getCurrentPerson(task));
+            boolean isPinged = tasksPinged.containsKey(task);
+
+            if(!personName.isEmpty()) {
+                desc.append("**").append(WordUtils.capitalize(task.replace("_", " "))).append("**\n")
+                        .append("- Er Pinget: ").append(isPinged ? "Ja" : "Nei").append("\n")
+                        .append("- ").append(isPinged ? "Pinget" : "Neste").append(" Person: ").append(personName).append("\n");
+                if(isPinged) {
+                    long lastPinged = tasksPinged.get(task).get(0);
+                    long nextPing = lastPinged + (task.contains("dunkene") ? TimeUnit.MINUTES.toMillis(15) : TimeUnit.HOURS.toMillis(8));
+                    LocalDateTime curr = LocalDateTime.now();
+                    LocalDateTime next = LocalDateTime.ofInstant(Instant.ofEpochMilli(nextPing), ZoneId.systemDefault());
+                    long minutesTill = curr.until(next, ChronoUnit.MINUTES);
+                    long hoursTill = (minutesTill / 60);
+                    long minsTill = (minutesTill % 60);
+                    LocalDateTime prev = LocalDateTime.ofInstant(Instant.ofEpochMilli(lastPinged), ZoneId.systemDefault());
+                    long minutesSince = prev.until(curr, ChronoUnit.MINUTES);
+                    long hoursSince = (minutesSince / 60);
+                    long minsSince = (minutesSince % 60);
+                    String timeTill = (minutesTill >= 60 ? hoursTill + " time" + (hoursTill != 1 ? "r, " : ", ") + minsTill + " minutt" + (minsTill != 1 ? "er" : "") : minutesTill + " minutt" + (minutesTill != 1 ? "er" : ""));
+                    String timeSince = (minutesSince >= 60 ? hoursSince + " time" + (hoursSince != 1 ? "r, " : ", ") + minsSince + " minutt" + (minsSince != 1 ? "er" : "") : minutesSince + " minutt" + (minutesSince != 1 ? "er" : ""));
+                    desc.append("- Sist Pinget: ").append(timeSince).append(" siden").append("\n")
+                            .append("- Neste Ping: ").append("Om ").append(timeTill).append("\n");
+                }
+                long autoPing = (long) data.get(1);
+                if(autoPing != 0) {
+                    LocalDateTime dateTime = LocalDateTime.ofInstant(Instant.ofEpochMilli(autoPing), ZoneId.systemDefault());
+                    int day = dateTime.getDayOfMonth();
+                    String month = dateTime.getMonth().getDisplayName(TextStyle.FULL, new Locale("no"));
+                    desc.append("- Neste Auto Ping: ").append(day).append(" ").append(month).append("\n");
+                }
+            }
+        });
+
+        EmbedBuilder embed = new EmbedBuilder();
+        embed.setTitle("Status på Tasks");
+        embed.setDescription(desc.toString());
+        slashInt.createImmediateResponder()
+                .addEmbed(embed)
+                .setFlags(MessageFlag.EPHEMERAL)
+                .respond();
     }
     private static Properties getDefaultProperties() {
         Properties defaultConfig = new Properties();
@@ -338,13 +444,18 @@ public class MainBot {
                 .setDefaultEnabledForPermissions(PermissionType.ADMINISTRATOR)
                 .createGlobal(api)
                 .join();
+        SlashCommand.with("pingstatus", "Sjekke status på tasks")
+                .setDefaultEnabledForPermissions(PermissionType.ADMINISTRATOR)
+                .createGlobal(api)
+                .join();
 
         api.addSlashCommandCreateListener(event -> {
             SlashCommandInteraction slashInt = event.getSlashCommandInteraction();
             User commandUser = slashInt.getUser();
 
             if (canUseCommands(commandUser.getId())) {
-                if(slashInt.getCommandName().equalsIgnoreCase("pingtask")) {
+                String cmd = slashInt.getCommandName().toLowerCase();
+                if(cmd.equals("pingtask")) {
                     slashInt.createImmediateResponder()
                         .setContent("Velg hvilke tasks du vil pinge:")
                         .addComponents(
@@ -356,6 +467,8 @@ public class MainBot {
                                     SelectMenuOption.create("Rydde (Teams)", "rydde", "Klikk her for å pinge Rydde (Teams)")))))
                             .setFlags(MessageFlag.EPHEMERAL)
                             .respond();
+                } else if(cmd.equals("pingstatus")) {
+                    sendStatus(slashInt);
                 }
             } else {
                 slashInt.createImmediateResponder()
@@ -390,7 +503,7 @@ public class MainBot {
             if ((!task.equalsIgnoreCase("rydde") && person == getCurrentPerson(task))
                     || (task.equalsIgnoreCase("rydde") && tasksPinged.containsKey(task) && (person == getCurrentPerson(task) || person == getSecondPerson(task)))) {
                 messageComponentInteraction.getMessage().delete();
-                setNextPerson(task);
+                setNextPerson(task, true);
                 event.getInteraction().createImmediateResponder()
                     .setContent(task + " listen har blitt oppdatert")
                     .setFlags(MessageFlag.EPHEMERAL)

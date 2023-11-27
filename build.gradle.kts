@@ -14,10 +14,11 @@ repositories {
 dependencies {
     implementation("org.javacord:javacord:3.8.0")
     implementation("org.mariadb.jdbc:mariadb-java-client:3.1.4")
+    implementation("org.apache.commons:commons-text:1.11.0")
 }
 
 group = "com.github.drakepork"
-version = "2.0"
+version = "2.5"
 description = "TaskBot"
 
 
