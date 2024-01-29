@@ -4,7 +4,7 @@ plugins {
     java
     `maven-publish`
     application
-    id("com.github.johnrengelman.shadow") version "8.1.1"
+    id("io.github.goooler.shadow") version "8.1.2"
 }
 
 repositories {
