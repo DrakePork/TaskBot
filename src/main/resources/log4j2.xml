@@ -2,14 +2,14 @@
 <Configuration status="WARN">
     <Appenders>
         <Console name="Console" target="SYSTEM_OUT">
-            <PatternLayout pattern="%d{yyyy-MM-dd HH:mm:ss.SSSZ} %-5level %logger - %msg%n"/>
+            <PatternLayout pattern="%d{yyyy-MM-dd HH:mm:ss.SSSZ} %-5level %logger - %msg %X{shard}%n"/>
         </Console>
         <File name="File" fileName="task.log" append="true">
-            <PatternLayout pattern="%d{yyyy-MM-dd HH:mm:ss.SSSZ} %-5level %logger - %msg%n"/>
+            <PatternLayout pattern="%d{yyyy-MM-dd HH:mm:ss.SSSZ} %-5level %logger - %msg %X{shard}%n"/>
         </File>
     </Appenders>
     <Loggers>
-        <Root level="all">
+        <Root level="debug">
             <AppenderRef ref="Console"/>
             <AppenderRef ref="File"/>
         </Root>

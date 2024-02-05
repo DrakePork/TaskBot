@@ -48,7 +48,6 @@ public class Task {
     public boolean isTeams() {
         return isTeams;
     }
-
     public long getNextPing() {
         return nextPing;
     }

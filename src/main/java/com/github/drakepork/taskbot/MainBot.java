@@ -325,9 +325,6 @@ public class MainBot {
                 .createGlobal(api)
                 .join();
 
-
-        FallbackLoggerConfiguration.setDebug(true);
-        FallbackLoggerConfiguration.setTrace(true);
         startScheduledTasks();
         logger.info("Successfully started the bot!");
     }
