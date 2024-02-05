@@ -1,6 +1,8 @@
 package com.github.drakepork.taskbot;
 
 import org.apache.commons.text.WordUtils;
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
 import org.javacord.api.DiscordApi;
 import org.javacord.api.DiscordApiBuilder;
 import org.javacord.api.entity.message.Message;
@@ -22,18 +24,20 @@ import java.time.*;
 import java.time.format.TextStyle;
 import java.time.temporal.ChronoUnit;
 import java.util.*;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
-import java.util.logging.*;
 import java.util.stream.Collectors;
-
 
 public class MainBot {
     private static DatabaseHook db;
     private static DiscordApi api;
-    private static final Logger logger = Logger.getLogger(Logger.GLOBAL_LOGGER_NAME);
+    private static final ScheduledExecutorService scheduler = Executors.newScheduledThreadPool(1);
+    private static final Logger logger = LogManager.getLogger(MainBot.class);
     private static final List<Task> tasks = new ArrayList<>();
     private static final List<Person> persons = new ArrayList<>();
+    public record Person(String name, long id) {}
     private static void updateOrder(Task task) {
         List<Person> order = task.getOrder();
         if(task.isTeams()) {
@@ -50,15 +54,16 @@ public class MainBot {
             order.addLast(order.removeFirst());
         }
         String peopleIds = order.stream()
-                .map(Person::getId).map(String::valueOf)
+                .map(Person::id).map(String::valueOf)
                 .collect(Collectors.joining(","));
         try (Connection conn = db.getConnection(); PreparedStatement ps = conn.prepareStatement("UPDATE tasks SET order_list = ? WHERE task_name = ?")) {
             ps.setString(1, peopleIds);
             ps.setString(2, task.getName());
             ps.executeUpdate();
             task.setOrder(order);
+            logger.info("Successfully updated order list for " + task.getName());
         } catch (SQLException e) {
-            logger.severe("Couldn't update order list in database!");
+            logger.error("Couldn't update order list in database!", e);
         }
     }
     private static void setNextPing(Task task) {
@@ -72,56 +77,57 @@ public class MainBot {
             ps.setString(2, task.getName());
             ps.executeUpdate();
             task.setNextPing(nextPing);
+            logger.info("Successfully set next ping for " + task.getName());
         } catch (SQLException e) {
-            logger.severe("Couldn't set next ping in database!");
+            logger.error("Couldn't set next ping in database!", e);
         }
     }
     private static boolean canUseCommands(User person) {
-        return persons.stream().anyMatch(p -> p.getId() == person.getId());
+        return persons.stream().anyMatch(p -> p.id() == person.getId());
     }
-    private static void autoPingTasksTimer() {
-        Timer timer = new Timer();
-        timer.scheduleAtFixedRate(new TimerTask() {
+    public static void startScheduledTasks() {
+        final Runnable taskRunner = new Runnable() {
             public void run() {
+                autoPingTasks();
+                pingedTasks();
+            }
+
+            private void autoPingTasks() {
                 LocalDateTime now = LocalDateTime.now();
                 int hour = now.getHour();
                 boolean general = hour == 10;
                 boolean dunkene = hour == 17;
 
-                if(!general && !dunkene) return;
+                if (!general && !dunkene) return;
                 List<Task> autoTasks = tasks.stream().filter(task -> task.getNextPing() != 0 &&
                         ((general && task.isType("general")) || (dunkene && task.isType("dunk")))).toList();
-                for(Task task : autoTasks) {
+                for (Task task : autoTasks) {
                     LocalDateTime pingDay = LocalDateTime.ofInstant(Instant.ofEpochMilli(task.getNextPing()), ZoneId.systemDefault());
-                    if(pingDay.isBefore(now)) {
+                    if (pingDay.isBefore(now)) {
                         setNextPing(task);
                         continue;
                     }
-                    if(task.isPinged() || now.getDayOfYear() != pingDay.getDayOfYear()) continue;
+                    if (task.isPinged() || now.getDayOfYear() != pingDay.getDayOfYear()) continue;
                     pingTask(task);
                 }
             }
-        }, 0, TimeUnit.MINUTES.toMillis(5));
-    }
-    private static void pingedTasksTimer() {
-        Timer timer = new Timer();
-        timer.scheduleAtFixedRate(new TimerTask() {
-            public void run() {
+
+            private void pingedTasks() {
                 tasks.stream().filter(Task::isPinged).forEach(task -> {
                     long pingTime = TimeUnit.HOURS.toMillis(8) + task.getLastPing();
                     boolean isDunker = task.isType("dunk");
-                    if(isDunker) pingTime = TimeUnit.MINUTES.toMillis(15) + task.getLastPing();
+                    if (isDunker) pingTime = TimeUnit.MINUTES.toMillis(15) + task.getLastPing();
 
-                    if(pingTime > System.currentTimeMillis()) return;
+                    if (pingTime > System.currentTimeMillis()) return;
                     task.getMessages().forEach(Message::delete);
 
-                    if(isDunker) {
+                    if (isDunker) {
                         ZonedDateTime firstPinged = Instant.ofEpochMilli(task.getFirstPinged())
                                 .atZone(ZoneId.systemDefault());
                         ZonedDateTime now = ZonedDateTime.now();
 
                         long hoursSinceFirstPinged = ChronoUnit.HOURS.between(firstPinged, now);
-                        if(hoursSinceFirstPinged >= 18) {
+                        if (hoursSinceFirstPinged >= 18) {
                             task.setPinged(false);
                             return;
                         }
@@ -130,7 +136,9 @@ public class MainBot {
                     task.setLastPing(System.currentTimeMillis());
                 });
             }
-        }, 0, TimeUnit.MINUTES.toMillis(5));
+        };
+
+        scheduler.scheduleAtFixedRate(taskRunner, 0, 5, TimeUnit.MINUTES);
     }
     private static void sendTaskMsg(Task task) {
         logger.info("Sending " + task.getName() + " task message");
@@ -145,21 +153,26 @@ public class MainBot {
         task.getPingedPersons().forEach(person -> {
             String desc = task.getDescription();
             if(task.isTeams()) {
-                desc += "\n\nDIN LAG-KAMERAT ER: " + task.getPingedPersons().get(i.get()).getName();
+                desc += "\n\nDIN LAG-KAMERAT ER: " + task.getPingedPersons().get(i.get()).name();
                 i.getAndDecrement();
             }
             embed.setDescription(desc);
             msg.setEmbed(embed);
-            Message message = msg.send(person.getUser()).exceptionally(e -> {logger.severe(e.getMessage()); return null;}).join();
+            User user = api.getUserById(person.id()).exceptionally(e -> {logger.error("Couldn't get user!", e); return null;}).join();
+            if(user == null) {
+                logger.warn("Couldn't find user with id " + person.id());
+                return;
+            }
+            Message message = msg.send(user).join();
             if(message != null) {
                 messages.add(message);
-                logger.info("Sent message to " + person.getName());
+                logger.info("Sent message to " + person.name());
             } else {
-                logger.severe("Couldn't send message to " + person.getName());
-                persons.stream().filter(p -> p.getName().equalsIgnoreCase("andreas")).findFirst().ifPresent(p -> {
+                logger.error("Couldn't send message to " + person.name());
+                persons.stream().filter(p -> p.name().equalsIgnoreCase("andreas")).findFirst().ifPresent(p -> {
                     MessageBuilder error = new MessageBuilder();
-                    error.setContent("Klarte ikke å sende melding til " + person.getName() + " for " + task.getName() + " task");
-                    error.send(p.getUser());
+                    error.setContent("Klarte ikke å sende melding til " + person.name() + " for " + task.getName() + " task");
+                    error.send(user);
                 });
                 task.setPinged(false);
             }
@@ -183,8 +196,8 @@ public class MainBot {
         StringBuilder desc = new StringBuilder();
 
         tasks.forEach(task -> {
-            String peopleNames = task.isPinged() ? task.getPingedPersons().stream().map(Person::getName).collect(Collectors.joining(", "))
-                    : task.isTeams() ? (task.getOrder().getFirst().getName() + ", " + task.getOrder().get(1).getName()) : task.getOrder().getFirst().getName();
+            String peopleNames = task.isPinged() ? task.getPingedPersons().stream().map(Person::name).collect(Collectors.joining(", "))
+                    : task.isTeams() ? (task.getOrder().getFirst().name() + ", " + task.getOrder().get(1).name()) : task.getOrder().getFirst().name();
             desc.append("**").append(WordUtils.capitalize(task.getName().replace("_", " "))).append("**\n")
                     .append("- Er Pinget: ").append(task.isPinged() ? "Ja" : "Nei").append("\n")
                     .append("- ").append(task.isPinged() ? "Pinget" : "Neste").append(" Person: ").append(peopleNames).append("\n");
@@ -256,18 +269,19 @@ public class MainBot {
 
         try (FileInputStream fileStream = new FileInputStream(externalConfigPath)) {
             config.load(fileStream);
+            logger.info("Successfully loaded the config file!");
         } catch (IOException e) {
-            logger.severe("Config file doesn't exist or couldn't be loaded!");
+            logger.error("Config file doesn't exist or couldn't be loaded!");
         }
         String token = config.getProperty("discord.token");
         if(token == null || token.isEmpty()) {
-            logger.severe("Discord token not set!");
+            logger.error("Discord token not set!");
         }
         api = new DiscordApiBuilder()
                 .setToken(token)
                 .login().join();
         if(api == null) {
-            logger.severe("Failed to connect to Discord!");
+            logger.error("Failed to connect to Discord!");
         }
 
         db = new DatabaseHook(config);
@@ -275,11 +289,11 @@ public class MainBot {
                 "SELECT * FROM people")) {
             ResultSet rs = ps.executeQuery();
             while (rs.next()) {
-                persons.add(new Person(rs.getString(2), api.getUserById(rs.getLong(1)).exceptionally(e -> null).join(), rs.getLong(1)));
+                persons.add(new Person(rs.getString(2), rs.getLong(1)));
             }
+            logger.info("Successfully got people from database!");
         } catch (SQLException e) {
-            logger.severe("Couldn't get people from database!");
-            logger.severe(e.getMessage());
+            logger.error("Couldn't get people from database!", e);
         }
 
         try (Connection conn = db.getConnection(); PreparedStatement ps = conn.prepareStatement(
@@ -291,15 +305,15 @@ public class MainBot {
                 String taskType = rs.getString(3);
                 List<Person> order = new ArrayList<>();
                 List<String> orderList = Arrays.asList(rs.getString(4).split(","));
-                orderList.forEach(person -> order.add(persons.stream().filter(p -> p.getId() == Long.parseLong(person)).findFirst().orElse(null)));
+                orderList.forEach(person -> order.add(persons.stream().filter(p -> p.id() == Long.parseLong(person)).findFirst().orElse(null)));
                 boolean isTeams = rs.getBoolean(5);
                 long nextPing = rs.getLong(6);
                 long interval = rs.getLong(7);
                 tasks.add(new Task(taskName, taskDesc, taskType, order, isTeams, nextPing, interval));
             }
+            logger.info("Successfully got tasks from database!");
         } catch (SQLException e) {
-            logger.severe("Couldn't get tasks from database!");
-            logger.severe(e.getMessage());
+            logger.error("Couldn't get tasks from database!", e);
         }
 
         SlashCommand.with("pingtask", "pinge tasks")
@@ -314,8 +328,8 @@ public class MainBot {
 
         FallbackLoggerConfiguration.setDebug(true);
         FallbackLoggerConfiguration.setTrace(true);
-        pingedTasksTimer();
-        autoPingTasksTimer();
+        startScheduledTasks();
+        logger.info("Successfully started the bot!");
     }
     private static void generateConfig(File configFile) {
         Properties defaultConfig = getDefaultProperties();
@@ -323,26 +337,8 @@ public class MainBot {
             defaultConfig.store(fos, "Default config values");
             logger.info("Successfully created the config file!");
         } catch (IOException e) {
-            logger.severe("Error creating the config file!");
+            logger.error("Error creating the config file!", e);
         }
-    }
-    public static void setupLogger() {
-        LogManager.getLogManager().reset();
-        ConsoleHandler consoleHandler = new ConsoleHandler();
-        consoleHandler.setLevel(Level.ALL);
-        consoleHandler.setFormatter(new SimpleFormatter());
-        logger.addHandler(consoleHandler);
-
-        try {
-            FileHandler fileHandler = new FileHandler("task.log", true);
-            fileHandler.setLevel(Level.ALL);
-            fileHandler.setFormatter(new SimpleFormatter());
-            logger.addHandler(fileHandler);
-        } catch (IOException e) {
-            logger.log(Level.SEVERE, "Error occur in FileHandler.", e);
-        }
-
-        logger.info("Logger setup complete.");
     }
     private static void createCommands() {
         api.addSlashCommandCreateListener(event -> {
@@ -382,7 +378,7 @@ public class MainBot {
                 if(task == null) return;
                 List<Person> people = task.getOrder().subList(0, task.isTeams() ? 2 : 1);
                 String peopleNames = people.stream()
-                        .map(Person::getName)
+                        .map(Person::name)
                         .collect(Collectors.joining(", "));
                 if(task.isPinged()) {
                     event.getInteraction().createImmediateResponder().setContent("Har allerede pinget " + peopleNames + " om " + task.getName()).setFlags(MessageFlag.EPHEMERAL).respond();
@@ -398,12 +394,20 @@ public class MainBot {
             ButtonInteraction interaction = event.getButtonInteraction();
             String taskId = interaction.getCustomId();
             Task task = getTask(taskId);
-            if(task == null) return;
+            if(task == null) {
+                interaction.createImmediateResponder()
+                        .setContent("Fant ikke tasken")
+                        .setFlags(MessageFlag.EPHEMERAL)
+                        .respond();
+                logger.warn("Couldn't find task with id " + taskId);
+                return;
+            }
 
-            Person person = task.getPingedPersons().stream().filter(p -> p.getId() == interaction.getUser().getId()).findFirst().orElse(null);
+            Person person = task.getPingedPersons().stream().filter(p -> p.id() == interaction.getUser().getId()).findFirst().orElse(null);
 
             if(!task.isPinged() || person == null) {
                 interaction.getMessage().delete();
+                logger.info("User " + interaction.getUser().getName() + " removed old " + task.getName() + " task message");
                 return;
             }
 
@@ -414,12 +418,17 @@ public class MainBot {
                     .setFlags(MessageFlag.EPHEMERAL)
                     .respond();
             updateOrder(task);
-            logger.info(person.getName() + " har fullført " + task.getName() + " task");
+            logger.info(person.name() + " har fullført " + task.getName() + " task");
         });
     }
-
+    static {
+        Runtime.getRuntime().addShutdownHook(new Thread(() -> {
+            logger.info("Shutting down the bot");
+            scheduler.shutdown();
+            api.disconnect();
+        }));
+    }
     public static void main(String[] args) {
-        setupLogger();
         initialSetup();
         createCommands();
     }

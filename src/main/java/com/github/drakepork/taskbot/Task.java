@@ -11,14 +11,14 @@ public class Task {
     private final String type;
     private long nextPing;
     private final long interval;
-    private List<Person> order;
+    private List<MainBot.Person> order;
     private final boolean isTeams;
     private boolean isPinged = false;
-    private List<Person> pingedPersons = new ArrayList<>();
+    private List<MainBot.Person> pingedPersons = new ArrayList<>();
     private List<Message> messages = new ArrayList<>();
     private long lastPing = 0;
     private long firstPinged = 0;
-    public Task(String name, String description, String type, List<Person> order, boolean isTeams, long nextPing, long interval) {
+    public Task(String name, String description, String type, List<MainBot.Person> order, boolean isTeams, long nextPing, long interval) {
         this.name = name;
         this.description = description;
         this.type = type;
@@ -39,10 +39,10 @@ public class Task {
     public boolean isType(String type) {
         return this.type.equalsIgnoreCase(type);
     }
-    public List<Person> getOrder() {
+    public List<MainBot.Person> getOrder() {
         return order;
     }
-    public void setOrder(List<Person> order) {
+    public void setOrder(List<MainBot.Person> order) {
         this.order = order;
     }
     public boolean isTeams() {
@@ -64,10 +64,10 @@ public class Task {
     public void setPinged(boolean pinged) {
         isPinged = pinged;
     }
-    public List<Person> getPingedPersons() {
+    public List<MainBot.Person> getPingedPersons() {
         return pingedPersons;
     }
-    public void setPingedPersons(List<Person> pingedPersons) {
+    public void setPingedPersons(List<MainBot.Person> pingedPersons) {
         this.pingedPersons = pingedPersons;
     }
     public List<Message> getMessages() {
