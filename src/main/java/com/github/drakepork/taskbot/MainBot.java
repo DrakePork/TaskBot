@@ -16,7 +16,6 @@ import org.javacord.api.entity.message.embed.EmbedBuilder;
 import org.javacord.api.entity.permission.PermissionType;
 import org.javacord.api.entity.user.User;
 import org.javacord.api.interaction.*;
-import org.javacord.api.util.logging.FallbackLoggerConfiguration;
 
 import java.io.*;
 import java.sql.*;
@@ -33,11 +32,16 @@ import java.util.stream.Collectors;
 public class MainBot {
     private static DatabaseHook db;
     private static DiscordApi api;
+
     private static final ScheduledExecutorService scheduler = Executors.newScheduledThreadPool(1);
     private static final Logger logger = LogManager.getLogger(MainBot.class);
+
     private static final List<Task> tasks = new ArrayList<>();
     private static final List<Person> persons = new ArrayList<>();
+    private static boolean washDay = false;
+
     public record Person(String name, long id) {}
+
     private static void updateOrder(Task task) {
         List<Person> order = task.getOrder();
         if(task.isTeams()) {
@@ -61,11 +65,12 @@ public class MainBot {
             ps.setString(2, task.getName());
             ps.executeUpdate();
             task.setOrder(order);
-            logger.info("Successfully updated order list for " + task.getName());
+            logger.info("Successfully updated order list for {}", task.getName());
         } catch (SQLException e) {
             logger.error("Couldn't update order list in database!", e);
         }
     }
+
     private static void setNextPing(Task task) {
         long interval = task.getInterval();
         if(interval == 0) return;
@@ -77,14 +82,16 @@ public class MainBot {
             ps.setString(2, task.getName());
             ps.executeUpdate();
             task.setNextPing(nextPing);
-            logger.info("Successfully set next ping for " + task.getName());
+            logger.info("Successfully set next ping for {}", task.getName());
         } catch (SQLException e) {
             logger.error("Couldn't set next ping in database!", e);
         }
     }
+
     private static boolean canUseCommands(User person) {
         return persons.stream().anyMatch(p -> p.id() == person.getId());
     }
+
     public static void startScheduledTasks() {
         final Runnable taskRunner = new Runnable() {
             public void run() {
@@ -109,6 +116,11 @@ public class MainBot {
                     }
                     if (task.isPinged() || now.getDayOfYear() != pingDay.getDayOfYear()) continue;
                     pingTask(task);
+                }
+
+                if(!washDay && now.getDayOfMonth() == 1) {
+                    washDay = true;
+                    sendWashDayPing();
                 }
             }
 
@@ -140,8 +152,59 @@ public class MainBot {
 
         scheduler.scheduleAtFixedRate(taskRunner, 0, 5, TimeUnit.MINUTES);
     }
+
+    private static void sendWashDayPing() {
+        EmbedBuilder embed = new EmbedBuilder();
+        embed.setTitle("# Vaske Dag");
+
+        MessageBuilder msg = new MessageBuilder();
+        msg.addComponents(ActionRow.of(Button.success("vaskedag", "Den e god! (Trykk for å fjerne)")));
+
+        embed.setDescription("""
+                Den første i måneden har ankommet! Gå til Hybelgruppen på discord og planlegg hvilke dag & tidspunkt å ha vaskingen på, og hvem som gjør hva.
+                ### Oppgaver:
+                1. Støvsuging av alle gulv
+                2. Vasking av alle gulv
+                3. Vasking av alle vinduskarmer
+                4. Vasking av overflaten til alle møbler (bord/kommoder/etc)
+                5. Vasking av kjøkkenbenken
+                6. Vasking av kjøkkenapparater (Kjøleskap/mikro/ovn/airfryer/kjøkkenviften/etc)
+                7. Vasking av hyller & skuffer på kjøkkenet
+                8. Vasking av badene (Vaske speil/toalettet/vasken/viftene/veggen if dirty/annet)
+                9. Rengjøring av lysbrytere, lister, stikkontakter, dørhåndtak & dører
+                10. Ta søppelet & rengjøring av søppelbøttene
+                11. Vasking av vinduer
+                12. Rengjøring av sofaene
+                ### Fellesoppgaver:
+                1. Gå gjennom kjøleskapene & frysene for å kaste alt som har gått ut på dato
+                2. Gå gjennom vår egen kjøkkenskuff og bli kvitt det som har gått ut på dato
+                3. Rengjøring av egen kjøkkenskuff
+                ### NOTES:
+                - Oppgavene er bare en guideline, er lov å gjøre andre ting du legger merke til og.
+                - Oppgaver kan bli splittet.
+                - Husk å bruke mikrofiberklut for vasking av speil/vinduer.
+                - Vasking/rengjøring kan bety vasking med klut og såpe eller støvtørking, er avhengig av hva som trengs (varierer fra ting til ting).
+                - Hvis du har en annen oppgave du mener trengs å bli gjort, kan du nevne den i hybelgruppen.
+                """);
+        msg.setEmbed(embed);
+        persons.forEach(person -> {
+            User user = api.getUserById(person.id()).exceptionally(e -> {logger.error("Couldn't get user!", e); return null;}).join();
+            if(user == null) {
+                logger.warn("Couldn't find user with id {}", person.id());
+                return;
+            }
+
+            Message message = msg.send(user).join();
+            if(message != null) {
+                logger.info("Sent vaskedag message to {}", person.name());
+            } else {
+                logger.error("Couldn't send vaskedag message to {}", person.name());
+            }
+        });
+    }
+
     private static void sendTaskMsg(Task task) {
-        logger.info("Sending " + task.getName() + " task message");
+        logger.info("Sending {} task message to {}", task.getName(), task.getPingedPersons().stream().map(p -> p.name).collect(Collectors.joining(", ")));
         EmbedBuilder embed = new EmbedBuilder();
         embed.setTitle("-= " + task.getName().replace("_", " ").toUpperCase() + " TIME =-");
 
@@ -160,15 +223,15 @@ public class MainBot {
             msg.setEmbed(embed);
             User user = api.getUserById(person.id()).exceptionally(e -> {logger.error("Couldn't get user!", e); return null;}).join();
             if(user == null) {
-                logger.warn("Couldn't find user with id " + person.id());
+                logger.warn("Couldn't find user with id {}", person.id());
                 return;
             }
             Message message = msg.send(user).join();
             if(message != null) {
                 messages.add(message);
-                logger.info("Sent message to " + person.name());
+                logger.info("Sent message to {}", person.name());
             } else {
-                logger.error("Couldn't send message to " + person.name());
+                logger.error("Couldn't send message to {}", person.name());
                 persons.stream().filter(p -> p.name().equalsIgnoreCase("andreas")).findFirst().ifPresent(p -> {
                     MessageBuilder error = new MessageBuilder();
                     error.setContent("Klarte ikke å sende melding til " + person.name() + " for " + task.getName() + " task");
@@ -178,10 +241,11 @@ public class MainBot {
             }
         });
         task.setMessages(messages);
-        logger.info("Successfully sent " + task.getName() + " task message");
+        logger.info("Successfully sent {} task message", task.getName());
     }
+
     public static void pingTask(Task task) {
-        logger.info("Pinging " + task.getName() + " task");
+        logger.info("Pinging {} task", task.getName());
         long pingTime = System.currentTimeMillis();
 
         List<Person> peopleToPing = task.getOrder().subList(0, task.isTeams() ? 2 : 1);
@@ -192,6 +256,7 @@ public class MainBot {
         setNextPing(task);
         sendTaskMsg(task);
     }
+
     private static void sendStatus(SlashCommandInteraction slashInt) {
         StringBuilder desc = new StringBuilder();
 
@@ -235,6 +300,7 @@ public class MainBot {
                 .setFlags(MessageFlag.EPHEMERAL)
                 .respond();
     }
+
     private static String formatDuration(LocalDateTime start, LocalDateTime end) {
         Duration duration = Duration.between(start, end);
         long hours = duration.toHours();
@@ -245,6 +311,7 @@ public class MainBot {
             return minutes + " minutt" + (minutes != 1 ? "er" : "");
         }
     }
+
     private static Properties getDefaultProperties() {
         Properties defaultConfig = new Properties();
         defaultConfig.setProperty("database.ip", "");
@@ -255,9 +322,11 @@ public class MainBot {
         defaultConfig.setProperty("discord.token", "");
         return defaultConfig;
     }
+
     private static Task getTask(String taskName) {
         return tasks.stream().filter(task -> task.getName().equalsIgnoreCase(taskName)).findFirst().orElse(null);
     }
+
     private static void initialSetup() {
         Properties config = new Properties();
         String externalConfigPath = "./config.properties";
@@ -328,6 +397,7 @@ public class MainBot {
         startScheduledTasks();
         logger.info("Successfully started the bot!");
     }
+
     private static void generateConfig(File configFile) {
         Properties defaultConfig = getDefaultProperties();
         try (FileOutputStream fos = new FileOutputStream(configFile)) {
@@ -337,6 +407,7 @@ public class MainBot {
             logger.error("Error creating the config file!", e);
         }
     }
+
     private static void createCommands() {
         api.addSlashCommandCreateListener(event -> {
             SlashCommandInteraction slashInt = event.getSlashCommandInteraction();
@@ -344,16 +415,15 @@ public class MainBot {
             if (canUseCommands(commandUser)) {
                 String cmd = slashInt.getCommandName().toLowerCase();
                 if(cmd.equals("pingtask")) {
+                    List<SelectMenuOption> options = new ArrayList<>();
+                    tasks.stream().filter(task -> task.isType("not-auto")).forEach(task -> {
+                        String taskName = WordUtils.capitalize(task.getName().replace("_", " "));
+                        options.add(SelectMenuOption.create(taskName, task.getName(), "Klikk her for å pinge " + taskName + " Task"));
+                    });
                     slashInt.createImmediateResponder()
                             .setContent("Velg hvilke tasks du vil pinge:")
                             .addComponents(
-                                    ActionRow.of(SelectMenu.createStringMenu("tasks", "Klikk for å vise tasks", 1, 1,
-                                            Arrays.asList(SelectMenuOption.create("Restavfall", "restavfall", "Klikk her for å pinge Restavfall Task"),
-                                                    SelectMenuOption.create("Papp", "papp", "Klikk her for å pinge Papp Task"),
-                                                    SelectMenuOption.create("Metall", "metall", "Klikk her for å pinge Metall Task"),
-                                                    SelectMenuOption.create("Matavfall", "matavfall", "Klikk her for å pinge Matavfall Task"),
-                                                    SelectMenuOption.create("Rydde (Teams)", "rydde", "Klikk her for å pinge Rydde (Teams)"),
-                                                    SelectMenuOption.create("Kjøkken Rydding", "kjøkken_rydding", "Klikk her for å pinge Kjøkken Rydding")))))
+                                    ActionRow.of(SelectMenu.createStringMenu("tasks", "Klikk for å vise tasks", 1, 1, options)))
                             .setFlags(MessageFlag.EPHEMERAL)
                             .respond();
                 } else if(cmd.equals("pingstatus")) {
@@ -396,7 +466,7 @@ public class MainBot {
                         .setContent("Fant ikke tasken")
                         .setFlags(MessageFlag.EPHEMERAL)
                         .respond();
-                logger.warn("Couldn't find task with id " + taskId);
+                logger.warn("Couldn't find task with id {}", taskId);
                 return;
             }
 
@@ -404,7 +474,7 @@ public class MainBot {
 
             if(!task.isPinged() || person == null) {
                 interaction.getMessage().delete();
-                logger.info("User " + interaction.getUser().getName() + " removed old " + task.getName() + " task message");
+                logger.info("User {} removed old {} task message", interaction.getUser().getName(), task.getName());
                 return;
             }
 
@@ -415,9 +485,10 @@ public class MainBot {
                     .setFlags(MessageFlag.EPHEMERAL)
                     .respond();
             updateOrder(task);
-            logger.info(person.name() + " har fullført " + task.getName() + " task");
+            logger.info("{} har fullført {} task", person.name(), task.getName());
         });
     }
+
     static {
         Runtime.getRuntime().addShutdownHook(new Thread(() -> {
             logger.info("Shutting down the bot");
@@ -425,6 +496,7 @@ public class MainBot {
             api.disconnect();
         }));
     }
+
     public static void main(String[] args) {
         initialSetup();
         createCommands();
